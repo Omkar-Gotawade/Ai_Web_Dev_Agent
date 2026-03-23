@@ -133,7 +133,7 @@ Ai_Web_dev_agent/
 
 API Key is already configured in `.env`:
 ```env
-GEMINI_API_KEY=your_api_key_here
+GEMINI_API_KEY=your_actual_api_key_here
 ```
 
 To use a different key:
