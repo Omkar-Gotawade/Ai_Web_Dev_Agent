@@ -10,6 +10,11 @@ interface ChatMessage {
   text: string
 }
 
+interface AgentActionResult {
+  type?: string
+  path?: string
+}
+
 function App() {
   const [prompt, setPrompt] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -49,11 +54,20 @@ function App() {
         throw new Error(errorMessage)
       }
 
-      const createdFiles = Array.isArray(data.files) ? data.files.join(', ') : 'none'
+      const actions = Array.isArray(data.actions) ? (data.actions as AgentActionResult[]) : []
+      const writtenFiles = actions
+        .filter((action) => action.type === 'write_file' && typeof action.path === 'string')
+        .map((action) => action.path as string)
+
+      const summary =
+        writtenFiles.length > 0
+          ? `Updated file(s): ${writtenFiles.join(', ')}`
+          : 'No file updates were returned.'
+
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'assistant',
-        text: `Done. Created ${data.filesCreated ?? 0} file(s): ${createdFiles}`,
+        text: `Done. Executed ${data.actionsExecuted ?? 0} action(s). ${summary}`,
       }
 
       setMessages((prev) => [...prev, assistantMessage])

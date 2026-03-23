@@ -16,6 +16,8 @@ const __dirname = path.dirname(__filename);
 // Initialize Express app
 const app = express();
 const PORT = 5000;
+const WORKSPACE_DIR = path.join(__dirname, 'workspace');
+const DEBUG_AGENT_LOGS = process.env.DEBUG_AGENT_LOGS === 'true';
 
 // Middleware
 app.use(cors());
@@ -26,12 +28,25 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
 // System instruction for Gemini
-const SYSTEM_INSTRUCTION = `You are a web developer AI.
-You must return ONLY valid JSON in this exact format:
+const SYSTEM_INSTRUCTION = `You are an AI coding agent.
+
+You can use these tools:
+- list_files
+- read_file
+- write_file
+
+You must decide whether to:
+- create a new project (from scratch)
+- or modify existing files
+
+If creating a new project, assume workspace is empty.
+
+You MUST return ONLY valid JSON in this format:
 
 {
-  "files": [
+  "actions": [
     {
+      "type": "write_file",
       "path": "index.html",
       "content": "<html>...</html>"
     }
@@ -39,35 +54,206 @@ You must return ONLY valid JSON in this exact format:
 }
 
 Rules:
-- No markdown
 - No explanations
-- No extra text
-- Only JSON output
-- Generate complete, working code
-- Use modern web development practices
-- Include all necessary HTML, CSS, and JavaScript in appropriate files`;
+- No markdown
+- Only JSON
+- Prefer modifying existing files unless user clearly asks to create something new`;
 
 /**
- * Generate website code using Gemini API
- * @param {string} prompt - User's prompt for website generation
+ * Detect whether prompt is asking for create or edit mode.
+ * @param {string} prompt
+ * @returns {'create' | 'edit'}
+ */
+function detectMode(prompt) {
+  const normalizedPrompt = prompt.toLowerCase();
+  const createKeywords = ['create', 'build', 'make', 'generate', 'new'];
+  const isCreate = createKeywords.some((keyword) => {
+    const keywordRegex = new RegExp(`\\b${keyword}\\b`, 'i');
+    return keywordRegex.test(normalizedPrompt);
+  });
+
+  return isCreate ? 'create' : 'edit';
+}
+
+/**
+ * Clear workspace folder and recreate it for fresh project generation.
+ */
+async function clearWorkspace() {
+  console.log(`🧹 Clearing workspace at ${WORKSPACE_DIR}...`);
+
+  try {
+    await fs.promises.rm(WORKSPACE_DIR, { recursive: true, force: true });
+    await ensureWorkspaceDirectory();
+    console.log('✅ Workspace cleared and recreated');
+  } catch (error) {
+    console.error('❌ Failed to clear workspace:', error);
+    throw new Error(`Failed to clear workspace: ${error.message}`);
+  }
+}
+
+/**
+ * Ensure workspace directory exists.
+ */
+async function ensureWorkspaceDirectory() {
+  await fs.promises.mkdir(WORKSPACE_DIR, { recursive: true });
+}
+
+/**
+ * Resolve a workspace-relative path safely.
+ * @param {string} relativePath
+ * @returns {string}
+ */
+function resolveWorkspacePath(relativePath = '') {
+  const targetPath = path.resolve(WORKSPACE_DIR, relativePath);
+  const workspaceRoot = path.resolve(WORKSPACE_DIR);
+
+  if (targetPath !== workspaceRoot && !targetPath.startsWith(`${workspaceRoot}${path.sep}`)) {
+    throw new Error(`Path is outside workspace: ${relativePath}`);
+  }
+
+  return targetPath;
+}
+
+/**
+ * Recursively list files in workspace.
+ * @param {string} directory
+ * @returns {Promise<string[]>}
+ */
+async function listFiles(directory = '') {
+  await ensureWorkspaceDirectory();
+
+  const startPath = resolveWorkspacePath(directory);
+  const result = [];
+
+  async function walk(currentPath) {
+    let entries;
+    try {
+      entries = await fs.promises.readdir(currentPath, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        return;
+      }
+      throw error;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else {
+        const relative = path.relative(WORKSPACE_DIR, fullPath).replaceAll('\\', '/');
+        result.push(relative);
+      }
+    }
+  }
+
+  await walk(startPath);
+  result.sort();
+  return result;
+}
+
+/**
+ * Read a file from workspace.
+ * @param {string} filePath
+ * @returns {Promise<string>}
+ */
+async function readFile(filePath) {
+  const targetPath = resolveWorkspacePath(filePath);
+
+  try {
+    return await fs.promises.readFile(targetPath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(`File not found: ${filePath}`);
+    }
+    throw new Error(`Failed to read file ${filePath}: ${error.message}`);
+  }
+}
+
+/**
+ * Write a file into workspace.
+ * @param {string} filePath
+ * @param {string} content
+ */
+async function writeFile(filePath, content) {
+  const targetPath = resolveWorkspacePath(filePath);
+  const dirPath = path.dirname(targetPath);
+
+  await fs.promises.mkdir(dirPath, { recursive: true });
+  await fs.promises.writeFile(targetPath, content, 'utf8');
+}
+
+/**
+ * Build context from existing workspace files.
+ * @returns {Promise<{files: string[], fileContents: Array<{path: string, content: string}>}>}
+ */
+async function gatherWorkspaceContext() {
+  const files = await listFiles();
+  const importantFiles = ['index.html', 'style.css', 'styles.css', 'script.js'];
+
+  const selectedFiles = importantFiles.filter((file) => files.includes(file));
+  if (selectedFiles.length === 0) {
+    selectedFiles.push(...files.slice(0, 3));
+  }
+
+  const fileContents = [];
+  for (const file of selectedFiles) {
+    try {
+      const content = await readFile(file);
+      fileContents.push({
+        path: file,
+        content: content.slice(0, 6000),
+      });
+    } catch (error) {
+      console.warn(`⚠️ Unable to read context file ${file}:`, error.message);
+    }
+  }
+
+  return { files, fileContents };
+}
+
+/**
+ * Generate agent actions using Gemini API
+ * @param {string} prompt - User request
+ * @param {'create' | 'edit'} mode
+ * @param {{files: string[], fileContents: Array<{path: string, content: string}>}} context
  * @returns {Promise<string>} - Raw response from Gemini
  */
-async function generateWebsiteCode(prompt) {
+async function generateAgentActions(prompt, mode, context) {
   try {
-    console.log('📤 Sending prompt to Gemini:', prompt);
+    console.log('📤 Sending agent prompt to Gemini:', prompt);
 
-    const fullPrompt = `${SYSTEM_INSTRUCTION}\n\nUser Request: ${prompt}`;
+    const contextSection = context.fileContents
+      .map((file) => `--- ${file.path} ---\n${file.content}`)
+      .join('\n\n');
+
+    const fullPrompt = `${SYSTEM_INSTRUCTION}
+
+Current project files:
+${JSON.stringify(context.files, null, 2)}
+
+File contents:
+${contextSection || '(No readable files yet)'}
+
+User Request:
+${prompt}
+
+Request Mode:
+${mode}`;
 
     const result = await model.generateContent(fullPrompt);
     const response = await result.response;
     const text = response.text();
 
     console.log('📥 Received response from Gemini');
-    console.log('Response length:', text.length);
+    if (DEBUG_AGENT_LOGS) {
+      console.log('Response length:', text.length);
+      console.log('🧾 Raw AI response:', text);
+    }
 
     return text;
   } catch (error) {
-    console.error('❌ Error generating content with Gemini:', error);
+    console.error('❌ Error generating actions with Gemini:', error);
     throw new Error(`Gemini API error: ${error.message}`);
   }
 }
@@ -89,55 +275,68 @@ function cleanJsonResponse(text) {
   // Trim again after removal
   cleaned = cleaned.trim();
 
-  console.log('🧹 Cleaned response (first 200 chars):', cleaned.substring(0, 200));
+  // Extract the first complete JSON object and ignore trailing junk.
+  cleaned = extractFirstJsonObject(cleaned);
+
+  if (DEBUG_AGENT_LOGS) {
+    console.log('🧹 Cleaned response (first 200 chars):', cleaned.substring(0, 200));
+  }
 
   return cleaned;
 }
 
 /**
- * Create directory recursively if it doesn't exist
- * @param {string} dirPath - Directory path to create
+ * Extract the first valid top-level JSON object from text.
+ * Handles braces inside JSON strings correctly.
+ * @param {string} text
+ * @returns {string}
  */
-function ensureDirectoryExists(dirPath) {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
-    console.log('📁 Created directory:', dirPath);
+function extractFirstJsonObject(text) {
+  const start = text.indexOf('{');
+  if (start === -1) {
+    throw new Error('No JSON object start found in model response');
   }
-}
 
-/**
- * Write files to the workspace directory
- * @param {Array} files - Array of file objects with path and content
- * @returns {number} - Number of files created
- */
-function writeFilesToWorkspace(files) {
-  const workspaceDir = path.join(__dirname, 'workspace');
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
 
-  // Ensure workspace directory exists
-  ensureDirectoryExists(workspaceDir);
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
 
-  let filesCreated = 0;
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
 
-  for (const file of files) {
-    try {
-      const filePath = path.join(workspaceDir, file.path);
-      const fileDir = path.dirname(filePath);
+    if (char === '\\') {
+      escaping = true;
+      continue;
+    }
 
-      // Ensure the file's directory exists
-      ensureDirectoryExists(fileDir);
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
 
-      // Write the file
-      fs.writeFileSync(filePath, file.content, 'utf8');
-      console.log('✅ Created file:', file.path);
+    if (inString) {
+      continue;
+    }
 
-      filesCreated++;
-    } catch (error) {
-      console.error('❌ Error writing file:', file.path, error);
-      throw new Error(`Failed to write file ${file.path}: ${error.message}`);
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, i + 1).trim();
+      }
     }
   }
 
-  return filesCreated;
+  throw new Error('No complete JSON object found in model response');
 }
 
 // Routes
@@ -150,7 +349,7 @@ app.get('/', (req, res) => {
 });
 
 /**
- * Generate website code endpoint
+ * Agent endpoint
  */
 app.post('/generate', async (req, res) => {
   try {
@@ -164,11 +363,28 @@ app.post('/generate', async (req, res) => {
       });
     }
 
-    console.log('🚀 Starting website generation...');
+    console.log('🚀 Starting agent execution...');
     console.log('Prompt:', prompt);
 
-    // Generate code using Gemini
-    const rawResponse = await generateWebsiteCode(prompt);
+    const mode = detectMode(prompt);
+    console.log(`🧭 Detected mode: ${mode}`);
+
+    const filesBefore = await listFiles();
+    console.log(`📊 Files before execution: ${filesBefore.length}`);
+
+    if (mode === 'create') {
+      await clearWorkspace();
+    }
+
+    const filesAfterModeHandling = await listFiles();
+    console.log(`📊 Files after mode handling: ${filesAfterModeHandling.length}`);
+
+    // Gather workspace context for agent
+    const context = await gatherWorkspaceContext();
+    console.log(`📁 Context files count: ${context.files.length}`);
+
+    // Generate actions using Gemini
+    const rawResponse = await generateAgentActions(prompt, mode, context);
 
     // Clean and parse JSON response
     const cleanedResponse = cleanJsonResponse(rawResponse);
@@ -189,27 +405,76 @@ app.post('/generate', async (req, res) => {
     }
 
     // Validate response structure
-    if (!parsedResponse.files || !Array.isArray(parsedResponse.files)) {
+    if (!parsedResponse.actions || !Array.isArray(parsedResponse.actions)) {
       return res.status(500).json({
         success: false,
         error: 'Invalid response structure from Gemini',
-        details: 'Expected "files" array in response'
+        details: 'Expected "actions" array in response'
       });
     }
 
-    console.log(`📝 Parsed ${parsedResponse.files.length} files from response`);
+    console.log(`📝 Parsed ${parsedResponse.actions.length} actions from response`);
 
-    // Write files to workspace
-    const filesCreated = writeFilesToWorkspace(parsedResponse.files);
+    let actionsExecuted = 0;
+    const actionResults = [];
 
-    console.log('✨ Website generation complete!');
-    console.log(`Created ${filesCreated} files in workspace/`);
+    // Execute returned actions
+    for (const action of parsedResponse.actions) {
+      if (!action || typeof action !== 'object' || !action.type) {
+        throw new Error('Invalid action entry: missing action type');
+      }
+
+      console.log('⚙️ Executing action:', action.type, action.path || action.directory || '');
+
+      if (action.type === 'write_file') {
+        if (typeof action.path !== 'string' || typeof action.content !== 'string') {
+          throw new Error('write_file action requires string "path" and "content"');
+        }
+
+        await writeFile(action.path, action.content);
+        actionResults.push({ type: action.type, path: action.path });
+        actionsExecuted += 1;
+        continue;
+      }
+
+      if (action.type === 'read_file') {
+        if (typeof action.path !== 'string') {
+          throw new Error('read_file action requires string "path"');
+        }
+
+        const content = await readFile(action.path);
+        actionResults.push({
+          type: action.type,
+          path: action.path,
+          contentLength: content.length,
+        });
+        actionsExecuted += 1;
+        continue;
+      }
+
+      if (action.type === 'list_files') {
+        const directory = typeof action.directory === 'string' ? action.directory : '';
+        const files = await listFiles(directory);
+        actionResults.push({
+          type: action.type,
+          directory,
+          fileCount: files.length,
+        });
+        actionsExecuted += 1;
+        continue;
+      }
+
+      throw new Error(`Unsupported action type: ${action.type}`);
+    }
+
+    console.log('✨ Agent execution complete!');
+    console.log(`Executed ${actionsExecuted} actions`);
 
     // Return success response
     res.json({
       success: true,
-      filesCreated: filesCreated,
-      files: parsedResponse.files.map(f => f.path)
+      actionsExecuted,
+      actions: actionResults,
     });
 
   } catch (error) {
@@ -235,6 +500,7 @@ app.listen(PORT, () => {
 
   console.log('\n📝 Available endpoints:');
   console.log('  GET  / - Health check');
-  console.log('  POST /generate - Generate website code');
-  console.log('\n💡 Ready to generate websites!');
+  console.log('  POST /generate - Execute coding agent actions');
+  console.log(`📂 Workspace directory: ${WORKSPACE_DIR}`);
+  console.log('\n💡 Ready to execute agent actions!');
 });
