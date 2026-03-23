@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Web Dev Backend - Test Interface</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .endpoint-section {
+            margin-bottom: 30px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .endpoint-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+
+        .endpoint-title::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: #667eea;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        input, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            width: 100%;
+        }
+
+        button:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.2);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .response-box {
+            background: #f5f5f5;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 300px;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .response-box.show {
+            display: block;
+        }
+
+        .response-box.success {
+            border-left-color: #4caf50;
+            background: #f1f8f4;
+        }
+
+        .response-box.error {
+            border-left-color: #f44336;
+            background: #fdefed;
+        }
+
+        .response-label {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.online {
+            background-color: #4caf50;
+        }
+
+        .status-indicator.offline {
+            background-color: #f44336;
+        }
+
+        .status-indicator.checking {
+            background-color: #ff9800;
+            animation: pulse 0.6s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .server-status {
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+        }
+
+        .server-status.online {
+            background: #f1f8f4;
+            color: #2e7d32;
+            border: 1px solid #4caf50;
+        }
+
+        .server-status.offline {
+            background: #fdefed;
+            color: #c62828;
+            border: 1px solid #f44336;
+        }
+
+        .files-list {
+            margin-top: 15px;
+            padding: 10px;
+            background: #fafafa;
+            border-radius: 6px;
+        }
+
+        .file-item {
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .file-item:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 AI Web Dev Backend</h1>
+        <p class="subtitle">Test your Express + Gemini API server</p>
+
+        <div class="server-status" id="serverStatus">
+            <span class="status-indicator checking"></span>
+            <span>Checking server connection...</span>
+        </div>
+
+        <!-- Health Check Section -->
+        <div class="endpoint-section">
+            <div class="endpoint-title">GET / - Health Check</div>
+            <p style="color: #666; margin-bottom: 15px; font-size: 13px;">
+                Check if the server is running and responding to requests.
+            </p>
+            <button id="healthBtn" onclick="testHealth()">Test Health Endpoint</button>
+            <div id="healthResponse" class="response-box">
+                <div class="response-label">Response:</div>
+                <pre id="healthContent"></pre>
+            </div>
+        </div>
+
+        <!-- Generate Section -->
+        <div class="endpoint-section">
+            <div class="endpoint-title">POST /generate - Generate Website</div>
+            <p style="color: #666; margin-bottom: 15px; font-size: 13px;">
+                Send a prompt to Gemini API and generate website code files.
+            </p>
+            <div class="form-group">
+                <label for="prompt">Prompt:</label>
+                <textarea id="prompt" placeholder="e.g., Create a simple landing page with a hero section and CTA button">Create a simple landing page with a hero section and a CTA button</textarea>
+            </div>
+            <button id="generateBtn" onclick="testGenerate()">Generate Website</button>
+            <div id="generateResponse" class="response-box">
+                <div class="response-label">Response:</div>
+                <pre id="generateContent"></pre>
+            </div>
+        </div>
+
+        <!-- Server Info -->
+        <div class="endpoint-section" style="background: #f9f9f9; border-color: #ddd;">
+            <h3 style="color: #333; margin-bottom: 10px;">ℹ️ Server Info</h3>
+            <ul style="list-style: none; font-size: 13px; color: #666; line-height: 1.8;">
+                <li>📍 <strong>URL:</strong> <code style="background: #fff; padding: 2px 6px; border-radius: 3px;">http://localhost:5000</code></li>
+                <li>🔌 <strong>Port:</strong> <code style="background: #fff; padding: 2px 6px; border-radius: 3px;">5000</code></li>
+                <li>📡 <strong>API:</strong> Express.js + Google Gemini</li>
+                <li>💾 <strong>Output:</strong> Files saved to <code style="background: #fff; padding: 2px 6px; border-radius: 3px;">workspace/</code> folder</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:5000';
+
+        // Check server status on load
+        document.addEventListener('DOMContentLoaded', checkServerStatus);
+
+        // Check server status every 5 seconds
+        setInterval(checkServerStatus, 5000);
+
+        async function checkServerStatus() {
+            const statusEl = document.getElementById('serverStatus');
+            try {
+                const response = await fetch(`${API_URL}/`, { timeout: 5000 });
+                if (response.ok) {
+                    statusEl.className = 'server-status online';
+                    statusEl.innerHTML = '<span class="status-indicator online"></span><span>✅ Server is online</span>';
+                    document.getElementById('healthBtn').disabled = false;
+                    document.getElementById('generateBtn').disabled = false;
+                } else {
+                    setOffline();
+                }
+            } catch (error) {
+                setOffline();
+            }
+
+            function setOffline() {
+                statusEl.className = 'server-status offline';
+                statusEl.innerHTML = '<span class="status-indicator offline"></span><span>❌ Server is offline - Make sure to start it with: npm start</span>';
+                document.getElementById('healthBtn').disabled = true;
+                document.getElementById('generateBtn').disabled = true;
+            }
+        }
+
+        async function testHealth() {
+            const btn = document.getElementById('healthBtn');
+            const responseEl = document.getElementById('healthResponse');
+            const contentEl = document.getElementById('healthContent');
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span>Testing...';
+
+            try {
+                const response = await fetch(`${API_URL}/`);
+                const data = await response.json();
+
+                responseEl.className = 'response-box show success';
+                contentEl.textContent = JSON.stringify(data, null, 2);
+
+                btn.innerHTML = 'Test Health Endpoint';
+            } catch (error) {
+                responseEl.className = 'response-box show error';
+                contentEl.textContent = `❌ Error: ${error.message}\n\nMake sure the server is running on localhost:5000`;
+                btn.innerHTML = 'Test Health Endpoint';
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function testGenerate() {
+            const prompt = document.getElementById('prompt').value;
+            if (!prompt.trim()) {
+                alert('Please enter a prompt');
+                return;
+            }
+
+            const btn = document.getElementById('generateBtn');
+            const responseEl = document.getElementById('generateResponse');
+            const contentEl = document.getElementById('generateContent');
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span>Generating...';
+            contentEl.textContent = 'Sending request to Gemini API...';
+            responseEl.className = 'response-box show';
+
+            try {
+                const response = await fetch(`${API_URL}/generate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ prompt })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    responseEl.className = 'response-box show success';
+                    let content = JSON.stringify(data, null, 2);
+                    if (data.files && data.files.length > 0) {
+                        content += '\n\n📁 Generated Files:\n';
+                        data.files.forEach(file => {
+                            content += `   ✓ ${file}\n`;
+                        });
+                    }
+                    contentEl.textContent = content;
+                } else {
+                    responseEl.className = 'response-box show error';
+                    contentEl.textContent = JSON.stringify(data, null, 2);
+                }
+
+                btn.innerHTML = 'Generate Website';
+            } catch (error) {
+                responseEl.className = 'response-box show error';
+                contentEl.textContent = `❌ Error: ${error.message}\n\nMake sure the server is running on localhost:5000`;
+                btn.innerHTML = 'Generate Website';
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>

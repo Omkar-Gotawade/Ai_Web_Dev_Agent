@@ -1,0 +1,154 @@
+.chat-shell {
+  min-height: 100vh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+}
+
+.chat-card {
+  width: min(760px, 100%);
+  background: #ffffff;
+  border: 1px solid #d8dee9;
+  border-radius: 14px;
+  box-shadow: 0 14px 34px rgba(14, 23, 38, 0.08);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-header {
+  padding: 20px;
+  border-bottom: 1px solid #e7ecf5;
+}
+
+.chat-header h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.chat-header p {
+  margin: 6px 0 0;
+  color: #5a677d;
+  font-size: 0.95rem;
+}
+
+.message-list {
+  margin: 0;
+  padding: 18px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 320px;
+  max-height: 460px;
+  overflow-y: auto;
+  background: #fafcff;
+}
+
+.empty-state {
+  color: #6b7280;
+  text-align: center;
+  margin: auto 0;
+}
+
+.message-item {
+  max-width: 85%;
+  border-radius: 12px;
+  padding: 10px 12px;
+  line-height: 1.4;
+}
+
+.message-item p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-role {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.message-item.user {
+  align-self: flex-end;
+  background: #e8f1ff;
+  border: 1px solid #c9ddff;
+}
+
+.message-item.assistant {
+  align-self: flex-start;
+  background: #ffffff;
+  border: 1px solid #d8e0ed;
+}
+
+.message-item.loading {
+  opacity: 0.8;
+  font-style: italic;
+}
+
+.input-row {
+  display: flex;
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid #e7ecf5;
+  background: #ffffff;
+}
+
+.input-row input {
+  flex: 1;
+  border: 1px solid #cfd7e6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 1rem;
+}
+
+.input-row input:focus {
+  outline: 2px solid #9ec0ff;
+  outline-offset: 1px;
+}
+
+.input-row button {
+  border: none;
+  background: #1f6feb;
+  color: #ffffff;
+  border-radius: 10px;
+  padding: 0 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.input-row button:disabled {
+  background: #93b5ef;
+  cursor: not-allowed;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+@media (max-width: 640px) {
+  .chat-shell {
+    padding: 10px;
+  }
+
+  .message-item {
+    max-width: 100%;
+  }
+
+  .input-row {
+    flex-direction: column;
+  }
+
+  .input-row button {
+    height: 42px;
+  }
+}
