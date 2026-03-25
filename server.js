@@ -23,7 +23,7 @@ const DEBUG_AGENT_LOGS = process.env.DEBUG_AGENT_LOGS === 'true';
 const MAX_SELF_HEAL_RETRIES = 3;
 const MAX_VALIDATION_RETRIES = 2;
 const AUTO_INSTALL_ON_REACT_CREATE = true;
-const REACT_PREVIEW_PORT = 5173;
+const REACT_PREVIEW_PORT = 5174;
 const execAsync = promisify(exec);
 let ACTIVE_PORT = PORT;
 let reactPreviewProcess = null;
@@ -103,7 +103,13 @@ Static website rules:
 - index.html must link style.css
 - index.html must include script.js
 - Do NOT skip any required file
-- Ensure a complete working website`;
+- Ensure a complete working website
+- Build a professional, production-like design (not a minimal starter)
+- Include clear page structure with navbar, hero, multiple content sections, and footer
+- Make layout responsive for desktop, tablet, and mobile
+- Use rich visual styling (spacing system, typography hierarchy, cards/grids, hover states)
+- Add interactive behaviors with JavaScript (buttons, toggles, tabs, or similar)
+- Include at least one form with client-side validation feedback`;
 
   const reactInstruction = `
 
@@ -119,7 +125,13 @@ React rules:
 - package.json must include scripts: dev and build
 - Include dependencies for react and react-dom and a dev workflow such as vite
 - Project must run with npm install and npm run dev
-- Do NOT return partial React code`;
+- Do NOT return partial React code
+- Build a professional, production-like interface (not a minimal demo)
+- Include navbar, hero, multiple sections, and footer in the rendered experience
+- Ensure responsive design for desktop/tablet/mobile
+- Include meaningful interactive features (forms, validation, and button-driven UI state)
+- Use clean structure with reusable React components (prefer src/components/* when helpful)
+- Keep styles separated from logic (App.css and/or component-level css files)`;
 
   return `${BASE_SYSTEM_INSTRUCTION}${projectType === 'react' ? reactInstruction : staticInstruction}`;
 }
@@ -198,10 +210,10 @@ function validateProject(actions, projectType) {
  */
 function buildRequiredFilesHint(projectType) {
   if (projectType === 'react') {
-    return `Required files to include as write_file actions: package.json, index.html, one App component file (src/App.js or src/App.jsx or src/App.tsx), and one entry file (src/main.js or src/main.jsx or src/index.js). package.json must include dev and build scripts with react/react-dom dependencies.`;
+    return `Required files to include as write_file actions: package.json, index.html, one App component file (src/App.js or src/App.jsx or src/App.tsx), and one entry file (src/main.js or src/main.jsx or src/index.js). package.json must include dev and build scripts with react/react-dom dependencies. Ensure production-like UI quality with navbar, hero, footer, multiple sections, responsive behavior, and interactive form validation.`;
   }
 
-  return 'Required files to include as write_file actions: index.html, style.css, script.js. index.html must link style.css and include script.js.';
+  return 'Required files to include as write_file actions: index.html, style.css, script.js. index.html must link style.css and include script.js. Ensure production-like UI quality with navbar, hero, footer, multiple sections, responsive behavior, and interactive form validation.';
 }
 
 /**
@@ -221,14 +233,91 @@ function detectMode(prompt) {
 }
 
 /**
+ * Wait helper for retry flows.
+ * @param {number} ms
+ */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Determine whether filesystem error is typically transient on Windows.
+ * @param {any} error
+ * @returns {boolean}
+ */
+function isRetriableFsError(error) {
+  const retriableCodes = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY']);
+  return Boolean(error?.code && retriableCodes.has(error.code));
+}
+
+/**
+ * Best-effort stop of processes listening on the React preview port.
+ */
+async function stopPreviewPortListeners() {
+  try {
+    if (process.platform === 'win32') {
+      const psCommand = `Get-NetTCPConnection -LocalPort ${REACT_PREVIEW_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`;
+      await execAsync(`powershell -NoProfile -Command "${psCommand}"`, { windowsHide: true });
+      return;
+    }
+
+    await execAsync(`lsof -ti tcp:${REACT_PREVIEW_PORT} | xargs -r kill -9`, { windowsHide: true });
+  } catch {
+    // Ignore cleanup failures; this is best-effort.
+  }
+}
+
+/**
  * Clear workspace folder and recreate it for fresh project generation.
  */
 async function clearWorkspace() {
   console.log(`🧹 Clearing workspace at ${WORKSPACE_DIR}...`);
 
   try {
-    await fs.promises.rm(WORKSPACE_DIR, { recursive: true, force: true });
+    stopReactPreviewServer();
+    await stopPreviewPortListeners();
     await ensureWorkspaceDirectory();
+
+    const entries = await fs.promises.readdir(WORKSPACE_DIR, { withFileTypes: true });
+    const failedEntries = [];
+
+    for (const entry of entries) {
+      const targetPath = path.join(WORKSPACE_DIR, entry.name);
+      let removed = false;
+
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        try {
+          await fs.promises.rm(targetPath, {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 200,
+          });
+          removed = true;
+          break;
+        } catch (error) {
+          if (!isRetriableFsError(error) || attempt === 4) {
+            failedEntries.push({ name: entry.name, code: error.code || 'UNKNOWN' });
+            break;
+          }
+
+          await delay(250 * attempt);
+        }
+      }
+
+      if (!removed) {
+        console.warn(`⚠️ Could not remove workspace entry: ${entry.name}`);
+      }
+    }
+
+    if (failedEntries.length > 0) {
+      const failedText = failedEntries
+        .map((item) => `${item.name} (${item.code})`)
+        .join(', ')
+        .slice(0, 500);
+      throw new Error(`Workspace contains locked entries: ${failedText}`);
+    }
+
     console.log('✅ Workspace cleared and recreated');
   } catch (error) {
     console.error('❌ Failed to clear workspace:', error);
@@ -362,6 +451,26 @@ function isProcessRunning(pid) {
 }
 
 /**
+ * Stop background React preview process if active.
+ */
+function stopReactPreviewServer() {
+  if (!reactPreviewProcess?.pid) {
+    return;
+  }
+
+  if (isProcessRunning(reactPreviewProcess.pid)) {
+    try {
+      process.kill(reactPreviewProcess.pid);
+      console.log(`🛑 Stopped React preview process (PID: ${reactPreviewProcess.pid})`);
+    } catch (error) {
+      console.warn('⚠️ Unable to stop React preview process:', error.message || error);
+    }
+  }
+
+  reactPreviewProcess = null;
+}
+
+/**
  * Start React preview server (Vite) in workspace and return preview URL.
  * @returns {Promise<{success: boolean, url?: string, error?: string}>}
  */
@@ -398,7 +507,7 @@ async function startReactPreviewServer() {
   const previewProcess = process.platform === 'win32'
     ? spawn(
       'cmd.exe',
-      ['/c', `npm run dev -- --host 127.0.0.1 --port ${REACT_PREVIEW_PORT}`],
+      ['/c', `npm run dev -- --host 127.0.0.1 --port ${REACT_PREVIEW_PORT} --strictPort`],
       {
         cwd: WORKSPACE_DIR,
         windowsHide: true,
@@ -408,7 +517,7 @@ async function startReactPreviewServer() {
     )
     : spawn(
       'npm',
-      ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(REACT_PREVIEW_PORT)],
+      ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(REACT_PREVIEW_PORT), '--strictPort'],
       {
         cwd: WORKSPACE_DIR,
         windowsHide: true,
@@ -450,6 +559,24 @@ async function startReactPreviewServer() {
     success: true,
     url: `http://localhost:${REACT_PREVIEW_PORT}`,
   };
+}
+
+/**
+ * Resolve preview URL automatically after action execution.
+ * @param {'react' | 'static'} projectType
+ * @returns {Promise<string>}
+ */
+async function getAutoPreviewUrl(projectType) {
+  if (projectType === 'react') {
+    const reactPreview = await startReactPreviewServer();
+    if (!reactPreview.success || !reactPreview.url) {
+      throw new Error(reactPreview.error || 'Failed to start React preview server');
+    }
+    return reactPreview.url;
+  }
+
+  await ensureWorkspaceDirectory();
+  return `http://localhost:${ACTIVE_PORT}/preview`;
 }
 
 /**
@@ -571,7 +698,7 @@ async function generateAgentActions(prompt, mode, context, options = {}) {
     const enforceCompleteness = options.enforceCompleteness !== false;
     const systemInstruction = buildSystemInstruction(projectType);
     const strictCompletenessInstruction = enforceCompleteness
-      ? `For this request, you MUST create a complete ${projectType} project with all required files. Do not skip any required files.`
+      ? `For this request, you MUST create a complete ${projectType} project with all required files. Do not skip any required files. Output must look production-like, include navbar/hero/footer, include multiple sections, be responsive, and include interactive behaviors.`
       : '';
 
     const contextSection = context.fileContents
@@ -1026,7 +1153,10 @@ app.post('/generate', async (req, res) => {
     const postCreateSetup = await runPostCreateSetup(projectType, mode);
     const totalActionsExecuted = execution.actionsExecuted + postCreateSetup.actionsExecuted;
     const allActionResults = [...execution.actionResults, ...postCreateSetup.actionResults];
-    const previewAction = allActionResults.find((action) => action?.type === 'preview_project');
+
+    console.log('👀 Auto preview enabled');
+    const previewUrl = await getAutoPreviewUrl(projectType);
+    console.log(`🔗 Preview URL returned: ${previewUrl}`);
 
     console.log('✨ Agent execution complete!');
     console.log(`Executed ${totalActionsExecuted} actions`);
@@ -1042,7 +1172,7 @@ app.post('/generate', async (req, res) => {
       actions: allActionResults,
       retriesUsed,
       fixesApplied,
-      ...(previewAction?.previewUrl ? { previewUrl: previewAction.previewUrl } : {}),
+      previewUrl,
     });
 
   } catch (error) {
