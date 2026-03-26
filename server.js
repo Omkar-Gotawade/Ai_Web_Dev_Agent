@@ -22,9 +22,11 @@ const WORKSPACE_DIR = path.join(__dirname, 'workspace');
 const DEBUG_AGENT_LOGS = process.env.DEBUG_AGENT_LOGS === 'true';
 const MAX_SELF_HEAL_RETRIES = 3;
 const MAX_VALIDATION_RETRIES = 2;
+const MAX_DEPLOY_RETRIES = 3;
 const AUTO_INSTALL_ON_REACT_CREATE = true;
 const REACT_PREVIEW_PORT = 5174;
 const execAsync = promisify(exec);
+const IGNORED_WORKSPACE_DIRS = new Set(['node_modules', '.git', '.vercel', 'dist', 'build']);
 let ACTIVE_PORT = PORT;
 let reactPreviewProcess = null;
 
@@ -82,6 +84,35 @@ function detectProjectType(prompt) {
   const reactKeywords = ['react', 'next', 'frontend app'];
   const isReact = reactKeywords.some((keyword) => normalizedPrompt.includes(keyword));
   return isReact ? 'react' : 'static';
+}
+
+/**
+ * Infer project type from existing workspace files.
+ * @returns {Promise<'react' | 'static'>}
+ */
+async function detectProjectTypeFromWorkspace() {
+  const hasPackageJson = await workspacePathExists('package.json');
+  const hasReactEntry =
+    (await workspacePathExists('src/main.js')) ||
+    (await workspacePathExists('src/main.jsx')) ||
+    (await workspacePathExists('src/main.ts')) ||
+    (await workspacePathExists('src/main.tsx')) ||
+    (await workspacePathExists('src/index.js')) ||
+    (await workspacePathExists('src/index.jsx')) ||
+    (await workspacePathExists('src/index.ts')) ||
+    (await workspacePathExists('src/index.tsx'));
+
+  return hasPackageJson && hasReactEntry ? 'react' : 'static';
+}
+
+/**
+ * Detect deploy-focused user requests.
+ * @param {string} prompt
+ * @returns {boolean}
+ */
+function isDeployRequest(prompt) {
+  const normalizedPrompt = String(prompt || '').toLowerCase();
+  return /\b(deploy|deployment|publish|go live|ship)\b/.test(normalizedPrompt);
 }
 
 /**
@@ -373,6 +404,9 @@ async function listFiles(directory = '') {
     for (const entry of entries) {
       const fullPath = path.join(currentPath, entry.name);
       if (entry.isDirectory()) {
+        if (IGNORED_WORKSPACE_DIRS.has(entry.name)) {
+          continue;
+        }
         await walk(fullPath);
       } else {
         const relative = path.relative(WORKSPACE_DIR, fullPath).replaceAll('\\', '/');
@@ -582,17 +616,23 @@ async function getAutoPreviewUrl(projectType) {
 /**
  * Execute a shell command in workspace and capture stdout/stderr.
  * @param {string} command
+ * @param {{timeoutMs?: number}} options
  * @returns {Promise<{success: boolean, stdout: string, stderr: string, error: string | null}>}
  */
-async function runCommand(command) {
+async function runCommand(command, options = {}) {
   await ensureWorkspaceDirectory();
   console.log(`🖥️ Running command: ${command}`);
+
+  const timeoutMs = typeof options.timeoutMs === 'number' && options.timeoutMs > 0
+    ? options.timeoutMs
+    : undefined;
 
   try {
     const { stdout, stderr } = await execAsync(command, {
       cwd: WORKSPACE_DIR,
       windowsHide: true,
       maxBuffer: 10 * 1024 * 1024,
+      timeout: timeoutMs,
     });
 
     const cleanedStdout = stdout?.trim() || '';
@@ -613,6 +653,154 @@ async function runCommand(command) {
       error: error.message,
     };
   }
+}
+
+/**
+ * Extract Vercel deployment URL from command output.
+ * @param {string} text
+ * @returns {string | null}
+ */
+function extractVercelDeployUrl(text) {
+  const combined = String(text || '');
+  const match = combined.match(/https:\/\/[a-zA-Z0-9-]+\.vercel\.app(?:\/[^\s"']*)?/);
+  return match ? match[0] : null;
+}
+
+/**
+ * Infer project type from workspace files for deployment tasks.
+ * @returns {Promise<'react' | 'static'>}
+ */
+async function detectWorkspaceProjectType() {
+  return detectProjectTypeFromWorkspace();
+}
+
+/**
+ * Auto-redeploy linked Vercel project after edit operations.
+ * @param {'create' | 'edit'} mode
+ * @returns {Promise<string | null>}
+ */
+async function autoRedeployAfterEdit(mode) {
+  if (mode !== 'edit') {
+    return null;
+  }
+
+  const isLinkedToVercel = await workspacePathExists('.vercel/project.json');
+  if (!isLinkedToVercel) {
+    return null;
+  }
+
+  console.log('🚀 Auto redeploy after edit started');
+  const deployment = await runVercelDeploymentWithRetry();
+  if (!deployment.success || !deployment.deployUrl) {
+    throw new Error(`Website updated locally but deployment failed: ${deployment.error || 'Unknown deploy error'}`);
+  }
+
+  console.log(`🌐 Auto redeploy URL: ${deployment.deployUrl}`);
+  return deployment.deployUrl;
+}
+
+/**
+ * Ensure workspace has Vercel-compatible build metadata.
+ * This prevents failures when a project is linked to a Vite build command.
+ * @returns {Promise<'react' | 'static'>}
+ */
+async function prepareWorkspaceForDeploy() {
+  const projectType = await detectWorkspaceProjectType();
+
+  if (projectType === 'react') {
+    return projectType;
+  }
+
+  const hasPackageJson = await workspacePathExists('package.json');
+  if (hasPackageJson) {
+    return projectType;
+  }
+
+  console.log('🛠️ Preparing static workspace for Vercel build compatibility...');
+  const staticPackageJson = {
+    name: 'static-site',
+    private: true,
+    version: '1.0.0',
+    scripts: {
+      build: 'vite build',
+      dev: 'vite',
+    },
+    devDependencies: {
+      vite: '^5.4.0',
+    },
+  };
+
+  await writeFile('package.json', `${JSON.stringify(staticPackageJson, null, 2)}\n`);
+  return projectType;
+}
+
+/**
+ * Identify transient deploy errors that are worth retrying.
+ * @param {string} message
+ * @returns {boolean}
+ */
+function isRetriableDeployError(message) {
+  const text = String(message || '').toLowerCase();
+  const retriableMarkers = [
+    'socket hang up',
+    'econnreset',
+    'etimedout',
+    'timed out',
+    'eai_again',
+    'enotfound',
+    'network',
+    '429',
+    '503',
+    'gateway timeout',
+  ];
+
+  return retriableMarkers.some((marker) => text.includes(marker));
+}
+
+/**
+ * Run Vercel deployment with retry support for transient network failures.
+ * @returns {Promise<{success: boolean, deployUrl?: string, output: string, error?: string}>}
+ */
+async function runVercelDeploymentWithRetry() {
+  let lastOutput = '';
+  let lastError = 'Deployment failed.';
+
+  for (let attempt = 1; attempt <= MAX_DEPLOY_RETRIES; attempt += 1) {
+    console.log(`🚀 Deployment attempt ${attempt}/${MAX_DEPLOY_RETRIES}`);
+    const deployResult = await runCommand('vercel --prod --yes', { timeoutMs: 180000 });
+    const output = [deployResult.stdout, deployResult.stderr, deployResult.error]
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 12000);
+
+    lastOutput = output;
+    const deployUrl = extractVercelDeployUrl(output);
+
+    if (deployUrl) {
+      return {
+        success: true,
+        deployUrl,
+        output,
+      };
+    }
+
+    const errorText = deployResult.stderr || deployResult.error || 'Unknown deployment error';
+    lastError = errorText;
+
+    if (!isRetriableDeployError(errorText) || attempt === MAX_DEPLOY_RETRIES) {
+      break;
+    }
+
+    const waitMs = 2000 * attempt;
+    console.warn(`⚠️ Deployment attempt failed (${errorText}). Retrying in ${waitMs}ms...`);
+    await delay(waitMs);
+  }
+
+  return {
+    success: false,
+    output: lastOutput,
+    error: lastError,
+  };
 }
 
 /**
@@ -721,7 +909,17 @@ ${strictCompletenessInstruction}
 Request Mode:
 ${mode}`;
 
-    const result = await model.generateContent(fullPrompt);
+    const result = await model.generateContent({
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: fullPrompt }],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+      },
+    });
     const response = await result.response;
     const text = response.text();
 
@@ -751,6 +949,11 @@ function parseAgentResponse(rawResponse) {
     parsedResponse = JSON.parse(cleanedResponse);
   } catch (parseError) {
     throw new Error(`Failed to parse Gemini response as JSON: ${parseError.message}`);
+  }
+
+  // Accept a top-level actions array by normalizing to the expected object shape.
+  if (Array.isArray(parsedResponse)) {
+    parsedResponse = { actions: parsedResponse };
   }
 
   if (!parsedResponse.actions || !Array.isArray(parsedResponse.actions)) {
@@ -963,8 +1166,8 @@ function cleanJsonResponse(text) {
   // Trim again after removal
   cleaned = cleaned.trim();
 
-  // Extract the first complete JSON object and ignore trailing junk.
-  cleaned = extractFirstJsonObject(cleaned);
+  // Extract the first complete JSON object/array and ignore trailing junk.
+  cleaned = extractFirstJsonValue(cleaned);
 
   if (DEBUG_AGENT_LOGS) {
     console.log('🧹 Cleaned response (first 200 chars):', cleaned.substring(0, 200));
@@ -974,17 +1177,34 @@ function cleanJsonResponse(text) {
 }
 
 /**
- * Extract the first valid top-level JSON object from text.
- * Handles braces inside JSON strings correctly.
+ * Extract the first valid top-level JSON object/array from text.
+ * Handles braces/brackets inside JSON strings correctly.
  * @param {string} text
  * @returns {string}
  */
-function extractFirstJsonObject(text) {
-  const start = text.indexOf('{');
-  if (start === -1) {
-    throw new Error('No JSON object start found in model response');
+function extractFirstJsonValue(text) {
+  const objectStart = text.indexOf('{');
+  const arrayStart = text.indexOf('[');
+
+  let start = -1;
+  let startChar = '';
+  if (objectStart === -1 && arrayStart === -1) {
+    throw new Error('No JSON value start found in model response');
   }
 
+  if (objectStart === -1 || (arrayStart !== -1 && arrayStart < objectStart)) {
+    start = arrayStart;
+    startChar = '[';
+  } else {
+    start = objectStart;
+    startChar = '{';
+  }
+
+  if (start === -1) {
+    throw new Error('No JSON value start found in model response');
+  }
+
+  const endChar = startChar === '{' ? '}' : ']';
   let depth = 0;
   let inString = false;
   let escaping = false;
@@ -1011,12 +1231,12 @@ function extractFirstJsonObject(text) {
       continue;
     }
 
-    if (char === '{') {
+    if (char === startChar) {
       depth += 1;
       continue;
     }
 
-    if (char === '}') {
+    if (char === endChar) {
       depth -= 1;
       if (depth === 0) {
         return text.slice(start, i + 1).trim();
@@ -1024,7 +1244,7 @@ function extractFirstJsonObject(text) {
     }
   }
 
-  throw new Error('No complete JSON object found in model response');
+  throw new Error('No complete JSON value found in model response');
 }
 
 // Routes
@@ -1042,6 +1262,38 @@ app.use('/preview', express.static(WORKSPACE_DIR, { index: 'index.html' }));
  */
 app.get('/', (req, res) => {
   res.json({ message: 'Server running' });
+});
+
+/**
+ * Dedicated deploy endpoint (no Gemini).
+ */
+app.post('/deploy', async (req, res) => {
+  try {
+    await ensureWorkspaceDirectory();
+
+    const deployProjectType = await prepareWorkspaceForDeploy();
+    console.log(`🧱 Deploy project type: ${deployProjectType}`);
+
+    console.log('🚀 Deployment started (manual button)');
+    const deployment = await runVercelDeploymentWithRetry();
+
+    if (!deployment.success || !deployment.deployUrl) {
+      throw new Error(deployment.error || 'Deployment failed.');
+    }
+
+    console.log(`🌐 Deployment URL: ${deployment.deployUrl}`);
+    return res.json({
+      success: true,
+      deployUrl: deployment.deployUrl,
+      output: deployment.output,
+    });
+  } catch (error) {
+    console.error('❌ Error in /deploy endpoint:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Deployment failed',
+    });
+  }
 });
 
 /**
@@ -1065,7 +1317,19 @@ app.post('/generate', async (req, res) => {
     const mode = detectMode(prompt);
     console.log(`🧭 Detected mode: ${mode}`);
 
-    const projectType = detectProjectType(prompt);
+    const deployOnly = isDeployRequest(prompt);
+    console.log(`🚢 Deploy request: ${deployOnly ? 'yes' : 'no'}`);
+
+    if (deployOnly) {
+      return res.status(400).json({
+        success: false,
+        error: 'Deployment is button-only. Use the Deploy button in the Live Preview panel.',
+      });
+    }
+
+    const projectType = mode === 'edit'
+      ? await detectProjectTypeFromWorkspace()
+      : detectProjectType(prompt);
     console.log(`🧱 Detected project type: ${projectType}`);
 
     const filesBefore = await listFiles();
@@ -1158,6 +1422,8 @@ app.post('/generate', async (req, res) => {
     const previewUrl = await getAutoPreviewUrl(projectType);
     console.log(`🔗 Preview URL returned: ${previewUrl}`);
 
+    const autoDeployUrl = await autoRedeployAfterEdit(mode);
+
     console.log('✨ Agent execution complete!');
     console.log(`Executed ${totalActionsExecuted} actions`);
     if (retriesUsed > 0) {
@@ -1168,11 +1434,13 @@ app.post('/generate', async (req, res) => {
     // Return success response
     res.json({
       success: true,
+      operation: mode,
       actionsExecuted: totalActionsExecuted,
       actions: allActionResults,
       retriesUsed,
       fixesApplied,
       previewUrl,
+      ...(autoDeployUrl ? { deployUrl: autoDeployUrl } : {}),
     });
 
   } catch (error) {
@@ -1201,6 +1469,7 @@ function startServer(port) {
     console.log('\n📝 Available endpoints:');
     console.log('  GET  / - Health check');
     console.log('  POST /generate - Execute coding agent actions');
+    console.log('  POST /deploy - Deploy current workspace via Vercel');
     console.log('  GET  /preview - Preview workspace output');
     console.log(`📂 Workspace directory: ${WORKSPACE_DIR}`);
     console.log('\n💡 Ready to execute agent actions!');

@@ -17,14 +17,46 @@ interface AgentActionResult {
 interface GenerateResponse {
   success?: boolean
   error?: string
+  operation?: 'create' | 'edit'
   actionsExecuted?: number
   actions?: AgentActionResult[]
   previewUrl?: string
+  deployUrl?: string
+}
+
+interface DeployResponse {
+  success?: boolean
+  error?: string
+  deployUrl?: string
+}
+
+function renderMessageWithLinks(text: string) {
+  const splitRegex = /(https?:\/\/[^\s]+)/g
+  const parts = text.split(splitRegex)
+
+  return parts.map((part, index) => {
+    if (/^https?:\/\//.test(part)) {
+      return (
+        <a
+          key={`link-${index}`}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline decoration-2 underline-offset-2"
+        >
+          {part}
+        </a>
+      )
+    }
+
+    return <span key={`text-${index}`}>{part}</span>
+  })
 }
 
 function App() {
   const [prompt, setPrompt] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [isDeploying, setIsDeploying] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [previewUrl, setPreviewUrl] = useState('')
 
@@ -32,7 +64,7 @@ function App() {
     event.preventDefault()
 
     const trimmedPrompt = prompt.trim()
-    if (!trimmedPrompt || isLoading) {
+    if (!trimmedPrompt || isLoading || isDeploying) {
       return
     }
 
@@ -69,7 +101,12 @@ function App() {
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'assistant',
-        text: 'Your website created successfully.',
+        text:
+          data.operation === 'edit'
+            ? data.deployUrl
+              ? `Website updated and deployed successfully: ${data.deployUrl}`
+              : 'Website updated successfully.'
+            : 'Your website created successfully.',
       }
 
       setMessages((prev) => [...prev, assistantMessage])
@@ -103,6 +140,50 @@ function App() {
     window.open(previewUrl, '_blank', 'noopener,noreferrer')
   }
 
+  const handleDeploy = async () => {
+    if (isDeploying) {
+      return
+    }
+
+    setIsDeploying(true)
+
+    try {
+      const response = await fetch('http://localhost:5000/deploy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      })
+
+      const data = (await response.json()) as DeployResponse
+
+      if (!response.ok || !data.success || !data.deployUrl) {
+        throw new Error(data.error ?? 'Deployment failed')
+      }
+
+      setPreviewUrl(`${data.deployUrl}?t=${Date.now()}`)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: `Website deployed successfully: ${data.deployUrl}`,
+        },
+      ])
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: `Deployment error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        },
+      ])
+    } finally {
+      setIsDeploying(false)
+    }
+  }
+
   return (
     <main className="flex h-screen w-screen overflow-hidden bg-gray-800">
       <section className="flex w-2/5 flex-col bg-gray-900 p-4 text-white" aria-label="Chat interface">
@@ -130,7 +211,7 @@ function App() {
                 <p className="mb-1 text-xs uppercase tracking-wide opacity-80">
                   {message.role === 'user' ? 'You' : 'Agent'}
                 </p>
-                <p className="whitespace-pre-wrap break-words">{message.text}</p>
+                <p className="whitespace-pre-wrap break-words">{renderMessageWithLinks(message.text)}</p>
               </div>
             </li>
           ))}
@@ -156,12 +237,12 @@ function App() {
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               placeholder="Ask for a website..."
-              disabled={isLoading}
+              disabled={isLoading || isDeploying}
               className="min-w-0 flex-1 rounded-lg border border-gray-600 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-400 outline-none ring-blue-500 transition focus:ring-2 disabled:opacity-60"
             />
             <button
               type="submit"
-              disabled={isLoading || prompt.trim().length === 0}
+              disabled={isLoading || isDeploying || prompt.trim().length === 0}
               className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-900"
             >
               {isLoading ? 'Sending...' : 'Send'}
@@ -189,6 +270,14 @@ function App() {
               className="rounded-md bg-gray-800 px-3 py-1 text-xs font-medium text-white transition hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Open in new tab
+            </button>
+            <button
+              type="button"
+              onClick={handleDeploy}
+              disabled={isDeploying}
+              className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isDeploying ? 'Deploying...' : 'Deploy'}
             </button>
           </div>
         </div>
